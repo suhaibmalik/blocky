@@ -3,6 +3,8 @@ package expirationcache
 import (
 	"time"
 
+	"github.com/benbjohnson/clock"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
@@ -24,33 +26,37 @@ var _ = Describe("Expiration cache", func() {
 		})
 		When("Put new value with positive TTL", func() {
 			It("Should return the value before element expires", func() {
-				cache := NewCache(WithCleanUpInterval(100 * time.Millisecond))
+				clock := clock.NewMock()
+				cache := NewCache(WithCleanUpInterval(100*time.Millisecond), WithClock(clock))
 				cache.Put("key1", "val1", 50*time.Millisecond)
+
+				clock.Add(15 * time.Millisecond)
+
 				val, expiration := cache.Get("key1")
 				Expect(val).Should(Equal("val1"))
-				Expect(expiration.Milliseconds()).Should(BeNumerically("<=", 50))
+				Expect(expiration.Milliseconds()).Should(BeNumerically("==", 35))
 
 				Expect(cache.TotalCount()).Should(Equal(1))
 			})
 			It("Should return nil after expiration", func() {
-				cache := NewCache(WithCleanUpInterval(100 * time.Millisecond))
+				clock := clock.NewMock()
+				cache := NewCache(WithCleanUpInterval(100*time.Millisecond), WithClock(clock))
 				cache.Put("key1", "val1", 50*time.Millisecond)
 
-				// wait for expiration
-				Eventually(func(g Gomega) {
-					val, ttl := cache.Get("key1")
-					g.Expect(val).Should(Equal("val1"))
-					g.Expect(ttl.Milliseconds()).Should(BeNumerically("==", 0))
-				}, "100ms").Should(Succeed())
+				clock.Add(51 * time.Millisecond)
+
+				val, ttl := cache.Get("key1")
+				Expect(val).Should(Equal("val1"))
+				Expect(ttl.Milliseconds()).Should(BeNumerically("==", 0))
 
 				Expect(cache.TotalCount()).Should(Equal(0))
 				// internal map has still the expired item
 				Expect(cache.lru.Len()).Should(Equal(1))
 
-				// wait for cleanup run
-				Eventually(func() int {
-					return cache.lru.Len()
-				}, "100ms").Should(Equal(0))
+				// simulate cleanup run
+				cache.cleanUp()
+
+				Expect(cache.lru.Len()).Should(BeNumerically("==", 0))
 			})
 		})
 		When("Put new value without expiration", func() {
@@ -96,26 +102,29 @@ var _ = Describe("Expiration cache", func() {
 				fn := func(key string) (val interface{}, ttl time.Duration) {
 					return "val2", time.Second
 				}
-				cache := NewCache(WithOnExpiredFn(fn))
+
+				clock := clock.NewMock()
+				cache := NewCache(WithOnExpiredFn(fn), WithClock(clock))
 				cache.Put("key1", "val1", 50*time.Millisecond)
 
+				clock.Add(51 * time.Millisecond)
+
 				// wait for expiration
-				Eventually(func(g Gomega) {
-					val, ttl := cache.Get("key1")
-					g.Expect(val).Should(Equal("val1"))
-					g.Expect(ttl.Milliseconds()).Should(
-						BeNumerically("==", 0))
-				}, "150ms").Should(Succeed())
+				val, ttl := cache.Get("key1")
+				Expect(val).Should(Equal("val1"))
+				Expect(ttl.Milliseconds()).Should(
+					BeNumerically("==", 0))
 			})
 
 			It("should update the value and TTL if function returns values on cleanup if element is expired", func() {
 				fn := func(key string) (val interface{}, ttl time.Duration) {
 					return "val2", time.Second
 				}
-				cache := NewCache(WithOnExpiredFn(fn))
-				cache.Put("key1", "val1", time.Millisecond)
+				clock := clock.NewMock()
+				cache := NewCache(WithOnExpiredFn(fn), WithClock(clock))
+				cache.Put("key1", "val1", 100*time.Millisecond)
 
-				time.Sleep(2 * time.Millisecond)
+				clock.Add(101 * time.Millisecond)
 
 				// trigger cleanUp manually -> onExpiredFn will be executed, because element is expired
 				cache.cleanUp()
@@ -123,21 +132,23 @@ var _ = Describe("Expiration cache", func() {
 				// wait for expiration
 				val, ttl := cache.Get("key1")
 				Expect(val).Should(Equal("val2"))
-				Expect(ttl.Milliseconds()).Should(And(
-					BeNumerically(">", 900)),
-					BeNumerically("<=", 1000))
+				Expect(ttl.Milliseconds()).Should(
+					BeNumerically("==", 1000))
 			})
 
 			It("should delete the key if function returns nil", func() {
 				fn := func(key string) (val interface{}, ttl time.Duration) {
 					return nil, 0
 				}
-				cache := NewCache(WithCleanUpInterval(100*time.Millisecond), WithOnExpiredFn(fn))
+				clock := clock.NewMock()
+				cache := NewCache(WithCleanUpInterval(100*time.Millisecond), WithOnExpiredFn(fn), WithClock(clock))
 				cache.Put("key1", "val1", 50*time.Millisecond)
 
-				Eventually(func() (interface{}, time.Duration) {
-					return cache.Get("key1")
-				}, "200ms").Should(BeNil())
+				clock.Add(51 * time.Millisecond)
+
+				cache.cleanUp()
+
+				Expect(cache.Get("key1")).Should(BeNil())
 			})
 
 		})

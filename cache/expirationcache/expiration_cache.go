@@ -4,6 +4,8 @@ import (
 	"time"
 
 	lru "github.com/hashicorp/golang-lru"
+
+	"github.com/benbjohnson/clock"
 )
 
 const (
@@ -20,6 +22,7 @@ type ExpiringLRUCache struct {
 	cleanUpInterval time.Duration
 	preExpirationFn OnExpirationCallback
 	lru             *lru.Cache
+	clock           clock.Clock
 }
 
 type CacheOption func(c *ExpiringLRUCache)
@@ -27,6 +30,12 @@ type CacheOption func(c *ExpiringLRUCache)
 func WithCleanUpInterval(d time.Duration) CacheOption {
 	return func(e *ExpiringLRUCache) {
 		e.cleanUpInterval = d
+	}
+}
+
+func WithClock(clock clock.Clock) CacheOption {
+	return func(e *ExpiringLRUCache) {
+		e.clock = clock
 	}
 }
 
@@ -57,7 +66,8 @@ func NewCache(options ...CacheOption) *ExpiringLRUCache {
 		preExpirationFn: func(key string) (val interface{}, ttl time.Duration) {
 			return nil, 0
 		},
-		lru: l,
+		lru:   l,
+		clock: clock.New(),
 	}
 
 	for _, opt := range options {
@@ -85,7 +95,7 @@ func (e *ExpiringLRUCache) cleanUp() {
 	// check for expired items and collect expired keys
 	for _, k := range e.lru.Keys() {
 		if v, ok := e.lru.Get(k); ok {
-			if isExpired(v.(*element)) {
+			if e.isExpired(v.(*element)) {
 				expiredKeys = append(expiredKeys, k.(string))
 			}
 		}
@@ -115,7 +125,7 @@ func (e *ExpiringLRUCache) Put(key string, val interface{}, ttl time.Duration) {
 		return
 	}
 
-	expiresEpochMs := time.Now().UnixMilli() + ttl.Milliseconds()
+	expiresEpochMs := e.clock.Now().UnixMilli() + ttl.Milliseconds()
 
 	// add new item
 	e.lru.Add(key, &element{
@@ -128,18 +138,18 @@ func (e *ExpiringLRUCache) Get(key string) (val interface{}, ttl time.Duration) 
 	el, found := e.lru.Get(key)
 
 	if found {
-		return el.(*element).val, calculateRemainTTL(el.(*element).expiresEpochMs)
+		return el.(*element).val, e.calculateRemainTTL(el.(*element).expiresEpochMs)
 	}
 
 	return nil, 0
 }
 
-func isExpired(el *element) bool {
-	return el.expiresEpochMs > 0 && time.Now().UnixMilli() > el.expiresEpochMs
+func (e *ExpiringLRUCache) isExpired(el *element) bool {
+	return el.expiresEpochMs > 0 && e.clock.Now().UnixMilli() > el.expiresEpochMs
 }
 
-func calculateRemainTTL(expiresEpoch int64) time.Duration {
-	if now := time.Now().UnixMilli(); now < expiresEpoch {
+func (e *ExpiringLRUCache) calculateRemainTTL(expiresEpoch int64) time.Duration {
+	if now := e.clock.Now().UnixMilli(); now < expiresEpoch {
 		return time.Duration(expiresEpoch-now) * time.Millisecond
 	}
 
@@ -149,7 +159,7 @@ func calculateRemainTTL(expiresEpoch int64) time.Duration {
 func (e *ExpiringLRUCache) TotalCount() (count int) {
 	for _, k := range e.lru.Keys() {
 		if v, ok := e.lru.Get(k); ok {
-			if !isExpired(v.(*element)) {
+			if !e.isExpired(v.(*element)) {
 				count++
 			}
 		}
